@@ -17,8 +17,8 @@ prompt = ChatPromptTemplate.from_messages([
 agent_chain = prompt | structured_llm
 
 def process_invoice_text(text: str) -> dict:
-    max_retries = 3
-    base_delay = 5  # Start with a 5 second wait
+    max_retries = 4  # Increased retries to handle tight free-tier ceilings
+    base_delay = 10  # Increased to 10 seconds to allow the Groq 6,000 TPM bucket to drain completely
     
     for attempt in range(max_retries):
         try:
@@ -26,15 +26,12 @@ def process_invoice_text(text: str) -> dict:
             return response.model_dump()
             
         except Exception as e:
-            error_str = str(e)
-            # Catch 429 Rate Limit error codes
-            if "429" in error_str or "rate_limit_exceeded" in error_str:
-                if attempt == max_retries - 1:
-                    raise e  # Out of retries, throw the error
-                
-                # Calculate exponential delay with a bit of random jitter to separate threads
-                sleep_time = (base_delay * (2 ** attempt)) + random.uniform(1, 3)
-                time.sleep(sleep_time)
-                continue
-                
-            raise e  # If it's a different error entirely, raise it immediately
+            # Catching ALL exceptions here forces LangChain's wrapped rate-limit 
+            # errors into our recovery sleep logic
+            if attempt == max_retries - 1:
+                raise e  # Completely out of retries, bubble up the error to app.py
+            
+            # Calculate exponential delay with random jitter to spread out threads
+            sleep_time = (base_delay * (2 ** attempt)) + random.uniform(1, 4)
+            time.sleep(sleep_time)
+            continue
