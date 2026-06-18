@@ -3,7 +3,6 @@ import re
 import pandas as pd
 import streamlit as st
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import GROQ_API_KEY
 from parsers import extract_text
 from agent import process_invoice_text
 
@@ -29,7 +28,6 @@ def sanitize_numeric(value) -> float:
         return 0.0
 
 def compute_tax_matrices(record: dict) -> dict:
-    # If the background extraction itself failed, return original dict with status fields intact
     if record.get('extraction_status', '').startswith('FAILED'):
         return record
 
@@ -91,7 +89,7 @@ def process_single_file(file_data, file_name):
                 }
             }
 
-        # Calls the updated agent.py which handles rate limits safely
+        # Calls the updated agent.py which targets Gemini 1.5 Flash safely
         extracted_json = process_invoice_text(raw_text)
         final_record = compute_tax_matrices(extracted_json)
         final_record['source_file'] = file_name
@@ -109,20 +107,23 @@ def process_single_file(file_data, file_name):
 # --- 🚀 STREAMLIT FRONTEND DASHBOARD ---
 st.set_page_config(page_title="GSTR-1 AI Toolkit Dashboard", layout="wide")
 st.title("⚡ Ultra-Fast GSTR-1 AI Extractor Engine")
-st.caption("Parallel Execution & Rate Limit Recovery Mode Active")
+st.caption("Parallel Execution & Gemini 1.5 Flash Active")
 
-if not GROQ_API_KEY:
-    user_api_key = st.sidebar.text_input("Provide Groq API Key:", type="password")
+# Fetch Gemini API Key from secrets setup configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    user_api_key = st.sidebar.text_input("Provide Gemini API Key:", type="password")
     if user_api_key:
-        os.environ["GROQ_API_KEY"] = user_api_key
+        os.environ["GEMINI_API_KEY"] = user_api_key
 else:
     st.sidebar.success("🔑 API Key verified from system environment config.")
 
 uploaded_files = st.file_uploader("Upload your batch invoice files:", accept_multiple_files=True, type=['pdf', 'docx'])
 
 if st.button("Process Folder Package Batch", type="primary"):
-    if not os.getenv("GROQ_API_KEY"):
-        st.error("Please add an active Groq API Key.")
+    if not os.getenv("GEMINI_API_KEY"):
+        st.error("Please add an active Gemini API Key.")
         st.stop()
     if not uploaded_files:
         st.warning("Please upload at least one valid invoice.")
@@ -135,7 +136,7 @@ if st.button("Process Folder Package Batch", type="primary"):
     total_files = len(uploaded_files)
     status_text.text(f"🚀 Spinning up parallel workers for {total_files} files...")
 
-    # Capped at max_workers=3 to safely throttle request pacing alongside agent pauses
+    # Capped at max_workers=3 to safely balance Gemini's 15 Requests Per Minute rule pacing
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(process_single_file, file.getbuffer().tobytes(), file.name): file.name 
@@ -147,7 +148,6 @@ if st.button("Process Folder Package Batch", type="primary"):
             try:
                 result = future.result()
                 record = result["record"]
-                # Map source filename if it was dropped during a nested fallback crash
                 if 'source_file' not in record or not record['source_file']:
                     record['source_file'] = filename
                 
@@ -160,7 +160,6 @@ if st.button("Process Folder Package Batch", type="primary"):
                     st.write(f"✅ Success -> **{filename}** (Inv No: {record.get('invoice_no')})")
                     
             except Exception as e:
-                # Emergency outer loop tracker to prevent table loss
                 emergency_record = {
                     "extraction_status": "FAILED: Critical Processing Halt",
                     "customer_name": "ERROR", "invoice_no": "ERROR", "source_file": filename
@@ -176,7 +175,6 @@ if st.button("Process Folder Package Batch", type="primary"):
     if processed_records:
         df = pd.DataFrame(processed_records)
         
-        # Safe structural fill for columns that might be missing on failure rows
         df['extraction_status'] = df['extraction_status'].fillna('Success')
         df['invoice_no'] = df['invoice_no'].fillna('ERROR')
         
@@ -190,7 +188,6 @@ if st.button("Process Folder Package Batch", type="primary"):
             'hsn_code', 'source_file'
         ]
         
-        # Build out missing columns dynamically to keep the spreadsheet format symmetrical
         for col in column_order:
             if col not in df.columns:
                 df[col] = 0.0 if col in ['invoice_value', 'taxable_value', 'igst', 'cgst', 'sgst', 'cess'] else ""
