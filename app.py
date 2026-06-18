@@ -29,6 +29,10 @@ def sanitize_numeric(value) -> float:
         return 0.0
 
 def compute_tax_matrices(record: dict) -> dict:
+    # If the background extraction itself failed, return original dict with status fields intact
+    if record.get('extraction_status', '').startswith('FAILED'):
+        return record
+
     HOME_PREFIX = "27"  # Default (Maharashtra)
     gstin = str(record.get('gstin', '')).strip().replace(" ", "").upper()
     
@@ -61,7 +65,7 @@ def compute_tax_matrices(record: dict) -> dict:
     return record
 
 def get_chronological_sort_key(invoice_no) -> int:
-    if not invoice_no: 
+    if not invoice_no or str(invoice_no) == "ERROR": 
         return 0
     match = re.search(r'(\d+)\s*$', str(invoice_no).strip())
     return int(match.group(1)) if match else 0
@@ -79,21 +83,33 @@ def process_single_file(file_data, file_name):
             os.remove(temp_path)
 
         if not raw_text.strip():
-            return {"error": f"Skipped {file_name} - Empty document text."}
+            return {
+                "success": True, 
+                "record": {
+                    "extraction_status": "FAILED: Empty File Text Content",
+                    "customer_name": "ERROR", "gstin": "ERROR", "invoice_no": "ERROR"
+                }
+            }
 
-        # Calls the auto-retry wrapper function inside agent.py
+        # Calls the updated agent.py which handles rate limits safely
         extracted_json = process_invoice_text(raw_text)
         final_record = compute_tax_matrices(extracted_json)
         final_record['source_file'] = file_name
         return {"success": True, "record": final_record}
         
     except Exception as e:
-        return {"error": f"Error parsing {file_name}: {str(e)}"}
+        return {
+            "success": True, 
+            "record": {
+                "extraction_status": f"FAILED: Thread Crash ({str(e)[:40]})",
+                "customer_name": "ERROR", "gstin": "ERROR", "invoice_no": "ERROR", "source_file": file_name
+            }
+        }
 
 # --- 🚀 STREAMLIT FRONTEND DASHBOARD ---
 st.set_page_config(page_title="GSTR-1 AI Toolkit Dashboard", layout="wide")
 st.title("⚡ Ultra-Fast GSTR-1 AI Extractor Engine")
-st.caption("Parallel Execution Mode Active")
+st.caption("Parallel Execution & Rate Limit Recovery Mode Active")
 
 if not GROQ_API_KEY:
     user_api_key = st.sidebar.text_input("Provide Groq API Key:", type="password")
@@ -119,7 +135,7 @@ if st.button("Process Folder Package Batch", type="primary"):
     total_files = len(uploaded_files)
     status_text.text(f"🚀 Spinning up parallel workers for {total_files} files...")
 
-    # Capped at max_workers=3 to control token volumes alongside backoff delays
+    # Capped at max_workers=3 to safely throttle request pacing alongside agent pauses
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(process_single_file, file.getbuffer().tobytes(), file.name): file.name 
@@ -130,33 +146,56 @@ if st.button("Process Folder Package Batch", type="primary"):
             filename = futures[future]
             try:
                 result = future.result()
-                if "success" in result:
-                    processed_records.append(result["record"])
-                    st.write(f"✅ Success -> **{filename}** (Inv No: {result['record'].get('invoice_no')})")
+                record = result["record"]
+                # Map source filename if it was dropped during a nested fallback crash
+                if 'source_file' not in record or not record['source_file']:
+                    record['source_file'] = filename
+                
+                processed_records.append(record)
+                
+                status_flag = record.get("extraction_status", "Success")
+                if "FAILED" in status_flag:
+                    st.warning(f"⚠️ Caught -> **{filename}** | Status: {status_flag}")
                 else:
-                    st.warning(result["error"])
+                    st.write(f"✅ Success -> **{filename}** (Inv No: {record.get('invoice_no')})")
+                    
             except Exception as e:
+                # Emergency outer loop tracker to prevent table loss
+                emergency_record = {
+                    "extraction_status": "FAILED: Critical Processing Halt",
+                    "customer_name": "ERROR", "invoice_no": "ERROR", "source_file": filename
+                }
+                processed_records.append(emergency_record)
                 st.error(f"❌ Thread failure on {filename}: {str(e)}")
             
             progress_bar.progress((idx + 1) / total_files)
-            status_text.text(f"⚡ Progress: [{idx+1}/{total_files}] files completed.")
+            status_text.text(f"⚡ Progress: [{idx+1}/{total_files}] files managed.")
 
-    status_text.text("✨ Parallel processing complete!")
+    status_text.text("✨ Parallel processing execution cycle complete!")
 
     if processed_records:
         df = pd.DataFrame(processed_records)
+        
+        # Safe structural fill for columns that might be missing on failure rows
+        df['extraction_status'] = df['extraction_status'].fillna('Success')
+        df['invoice_no'] = df['invoice_no'].fillna('ERROR')
         
         df['sort_key'] = df['invoice_no'].apply(get_chronological_sort_key)
         df = df.sort_values(by='sort_key', ascending=True).drop(columns=['sort_key'])
 
         column_order = [
-            'customer_name', 'gstin', 'invoice_no', 'invoice_date', 
+            'extraction_status', 'customer_name', 'gstin', 'invoice_no', 'invoice_date', 
             'invoice_value', 'tax_rate', 'taxable_value', 'igst', 
             'cgst', 'sgst', 'cess', 'state_of_supply', 'reverse_charge', 
             'hsn_code', 'source_file'
         ]
-        existing_cols = [c for c in column_order if c in df.columns]
-        df = df[existing_cols]
+        
+        # Build out missing columns dynamically to keep the spreadsheet format symmetrical
+        for col in column_order:
+            if col not in df.columns:
+                df[col] = 0.0 if col in ['invoice_value', 'taxable_value', 'igst', 'cgst', 'sgst', 'cess'] else ""
+
+        df = df[column_order]
 
         st.subheader("📊 Structured Spreadsheet Run View")
         st.dataframe(df, use_container_width=True)
