@@ -1,0 +1,11 @@
+# Sensitive keys
+.env
+
+# Local python runtimes/metadata
+__pycache__/
+*.pyc
+
+# Local runtime directories
+invoices/
+output/
+temp_runtime_*
