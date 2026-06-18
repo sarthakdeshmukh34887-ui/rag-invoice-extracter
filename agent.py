@@ -24,8 +24,8 @@ prompt = ChatPromptTemplate.from_messages([
 agent_chain = prompt | structured_llm
 
 def process_invoice_text(text: str) -> dict:
-    max_retries = 3
-    base_delay = 4  
+    max_retries = 5  # Increased to give ample retries
+    base_delay = 15  # Increased to 15 seconds to let the 10 RPM window completely drain
     
     for attempt in range(max_retries):
         try:
@@ -44,6 +44,7 @@ def process_invoice_text(text: str) -> dict:
                     "invoice_no": "ERROR"
                 }
             
-            sleep_time = base_delay + random.uniform(1, 3)
+            # Staggers the retry timing with a smart delay curve
+            sleep_time = (base_delay * (attempt + 1)) + random.uniform(2, 5)
             time.sleep(sleep_time)
             continue
